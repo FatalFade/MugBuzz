@@ -1,0 +1,13 @@
+# Never commit live config with keys
+config.local.php
+*.env
+.env.*
+
+# Editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# If you ever add a node layer
+node_modules/
