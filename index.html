@@ -918,6 +918,30 @@ async function runScan(){
       log(`  ✗ Torn: ${e.message}`, 'bad');
     }
 
+    // ── TORNPAL (secondary source, proxy required) ──
+    if(USE_PROXY){
+      try{
+        const tp = await tornpalFetch(itemId);
+        // TornPal response shape: { listings: [{seller_id, price, quantity}] } or array
+        const tpRaw = tp.listings || tp.bazaar || (Array.isArray(tp) ? tp : null);
+        if(tpRaw){
+          const tpArr = Array.isArray(tpRaw) ? tpRaw : Object.values(tpRaw);
+          let added = 0;
+          for(const tl of tpArr){
+            const sid = String(tl.seller_id || tl.ID || tl.id || '');
+            if(!sid) continue;
+            // Dedupe by seller ID
+            if(listings.some(l => String(l.ID ?? l.id ?? '') === sid)) continue;
+            listings.push({ ID: sid, cost: tl.price ?? tl.cost ?? 0, quantity: tl.quantity ?? tl.qty ?? 0 });
+            added++;
+          }
+          log(`  TornPal: +${added} listing${added!==1?'s':''} merged`, added?'ok':'inf');
+        }
+      } catch(tpe){
+        log(`  TornPal: ${tpe.message}`, 'bad');
+      }
+    }
+
     log(`  ${listings.length} listing${listings.length!==1?'s':''} — scanning profiles…`, listings.length?'inf':'bad');
     if(!listings.length) continue;
 
@@ -1086,9 +1110,25 @@ document.querySelectorAll('.sort-btn').forEach(btn=>{
 /* ── FFSCOUT ── */
 async function ffscoutFetch(playerId){
   const ffKey = getCfg().ffKey || '';
-  const headers = {}; if(ffKey) headers['Authorization'] = `Bearer ${ffKey}`;
-  const url = `https://torn.ffscout.com/api/v1/users/${playerId}`;
-  const res = await fetch(url, {headers});
+  let url;
+  if(USE_PROXY){
+    url = `${PROXY_URL}?target=ffscout&playerId=${playerId}${ffKey?'&ffKey='+encodeURIComponent(ffKey):''}`;
+  } else {
+    const headers = {}; if(ffKey) headers['Authorization'] = `Bearer ${ffKey}`;
+    const res = await fetch(`https://torn.ffscout.com/api/v1/users/${playerId}`, {headers});
+    if(res.status === 404) return null;
+    if(!res.ok) throw new Error(`FFscout ${res.status}`);
+    const d = await res.json();
+    const u = d.user || d.data || d;
+    return {
+      strength:  u.strength  || u.str || 0,
+      defense:   u.defense   || u.def || 0,
+      speed:     u.speed     || u.spd || 0,
+      dexterity: u.dexterity || u.dex || 0,
+      total: u.total || u.battlestats || ((u.strength||0)+(u.defense||0)+(u.speed||0)+(u.dexterity||0)),
+    };
+  }
+  const res = await fetch(url);
   if(res.status === 404) return null;
   if(!res.ok) throw new Error(`FFscout ${res.status}`);
   const d = await res.json();
@@ -1103,19 +1143,40 @@ async function ffscoutFetch(playerId){
 }
 
 /* ── HELPERS ── */
+// ── PROXY CONFIG ──
+// If proxy.php is in the same dir as index.html, this works as-is.
+// If hosted elsewhere, update PROXY_URL to the full path.
+const PROXY_URL = './proxy.php';
+const USE_PROXY = true; // set false to hit Torn directly (CORS OK, but TornPal blocked)
+
 async function tornFetch(path, keyOverride){
   const key = keyOverride || getCfg().apiKey || '';
   if(!key) throw new Error('No API key — open ⚙ settings');
-  const sep = path.includes('?') ? '&' : '?';
-  const res = await fetch(`https://api.torn.com${path}${sep}key=${key}&comment=mugbuzz`);
+  let url;
+  if(USE_PROXY){
+    const sep = path.includes('?') ? '&' : '?';
+    const tornPath = encodeURIComponent(`${path}${sep}key=${key}&comment=mugbuzz`);
+    url = `${PROXY_URL}?target=torn&path=${tornPath}`;
+  } else {
+    const sep = path.includes('?') ? '&' : '?';
+    url = `https://api.torn.com${path}${sep}key=${key}&comment=mugbuzz`;
+  }
+  const res = await fetch(url);
   if(!res.ok) throw new Error(`HTTP ${res.status}`);
   const d = await res.json();
   if(d.error){
     const code = d.error.code;
-    // Torn API error code 5 = too many requests
     if(code === 5) throw new Error(`Rate limit hit (code 5) — slow down`);
     throw new Error(`Torn API: ${d.error.error} (code ${code})`);
   }
+  return d;
+}
+
+async function tornpalFetch(itemId){
+  if(!USE_PROXY) throw new Error('TornPal requires proxy (CORS)');
+  const res = await fetch(`${PROXY_URL}?target=tornpal&itemId=${itemId}`);
+  if(!res.ok) throw new Error(`TornPal HTTP ${res.status}`);
+  const d = await res.json();
   return d;
 }
 function setPill(type, text){ const p=$('pill'); p.className=`pill ${type}`; p.textContent=text; }
