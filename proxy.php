@@ -50,15 +50,25 @@ switch ($target) {
     // ?target=torn&path=/market/206?selections=bazaar&key=APIKEY
     case 'torn': {
         $path = $_GET['path'] ?? '';
+        $key  = $_GET['key']  ?? '';
+        $isV2 = !empty($_GET['v2']);
         if (!$path) { http_response_code(400); echo json_encode(['error' => 'path required']); exit; }
-        // Decode and re-encode to strip any path traversal or redirect attempts.
-        // Only ever forwards to api.torn.com — no other host reachable via this case.
         $decoded = urldecode($path);
         if (strpos($decoded, '..') !== false || preg_match('#[\r\n]#', $decoded)) {
             http_response_code(400); echo json_encode(['error' => 'invalid path']); exit;
         }
-        $url = 'https://api.torn.com' . $decoded;
-        echo proxyFetch($url);
+        if ($isV2) {
+            // v2: Authorization header, no key in URL
+            $url = 'https://api.torn.com' . $decoded;
+            $headers = [];
+            if ($key) $headers[] = 'Authorization: ApiKey ' . $key;
+            echo proxyFetch($url, $headers);
+        } else {
+            // v1: key appended to query string
+            $sep = (strpos($decoded, '?') !== false) ? '&' : '?';
+            $url = 'https://api.torn.com' . $decoded . $sep . 'key=' . urlencode($key) . '&comment=mugbuzz';
+            echo proxyFetch($url);
+        }
         break;
     }
 
