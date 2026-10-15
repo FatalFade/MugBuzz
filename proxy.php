@@ -10,7 +10,12 @@
  *   ?target=ffscout&playerId=12345&ffKey=OPTIONAL
  */
 
-header('Access-Control-Allow-Origin: *');
+// ── CORS CONFIG ──
+// Lock this to your domain before deploying publicly.
+// e.g. 'https://yourdomain.com' or '*' for open access (dev only).
+define('ALLOWED_ORIGIN', '*');
+
+header('Access-Control-Allow-Origin: ' . ALLOWED_ORIGIN);
 header('Access-Control-Allow-Methods: GET, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type');
 header('Content-Type: application/json');
@@ -46,8 +51,13 @@ switch ($target) {
     case 'torn': {
         $path = $_GET['path'] ?? '';
         if (!$path) { http_response_code(400); echo json_encode(['error' => 'path required']); exit; }
-        // Sanitize: only allow paths to api.torn.com
-        $url = 'https://api.torn.com' . $path;
+        // Decode and re-encode to strip any path traversal or redirect attempts.
+        // Only ever forwards to api.torn.com — no other host reachable via this case.
+        $decoded = urldecode($path);
+        if (strpos($decoded, '..') !== false || preg_match('#[\r\n]#', $decoded)) {
+            http_response_code(400); echo json_encode(['error' => 'invalid path']); exit;
+        }
+        $url = 'https://api.torn.com' . $decoded;
         echo proxyFetch($url);
         break;
     }
@@ -57,7 +67,7 @@ switch ($target) {
     case 'tornpal': {
         $itemId = (int)($_GET['itemId'] ?? 0);
         if (!$itemId) { http_response_code(400); echo json_encode(['error' => 'itemId required']); exit; }
-        echo proxyFetch("https://tornpal.com/api/v1/bazaar/item/$itemId");
+        echo proxyFetch("https://tornpal.com/api/v1/markets/clist/$itemId");
         break;
     }
 

@@ -889,24 +889,26 @@ async function runScan(){
     log(`→ ${itemName}${marketValue?` · market $${Number(marketValue).toLocaleString()}`:''}`, 'inf');
 
     // ── FETCH LISTINGS ──
-    // Torn v1: /market/{id}?selections=bazaar → { bazaar: [{ID, cost, quantity}] }
-    // Torn may return bazaar as a keyed object {"0":{...}} or as an array — coerce both.
+    // Torn v2: /v2/market/{id}/itemmarket → { itemmarket: [{user_id, price, quantity}] }
+    // Bazaar selections deprecated after Item Market 2.0 (Oct 2024).
     let listings=[];
     try{
-      const d = await tornFetch(`/market/${itemId}?selections=bazaar`);
+      // v2 itemmarket endpoint — bazaar selections deprecated after Item Market 2.0 (Oct 2024)
+      const d = await tornFetch(`/v2/market/${itemId}/itemmarket`);
 
-      // Debug: log every key in the response so we know what shape it is
       const respKeys = Object.keys(d);
       log(`  API response keys: [${respKeys.join(', ')}]`, 'inf');
 
-      const raw = d.bazaar;
+      // v2 itemmarket response: { itemmarket: [ { id, user_id, price, quantity }, ... ] }
+      const raw = d.itemmarket;
       if(raw == null){
-        log(`  Torn: bazaar key is ${raw} — no active listings`, 'inf');
+        log(`  Torn: itemmarket key missing — keys: ${respKeys.join(', ')}`, 'bad');
       } else {
-        log(`  Torn: bazaar type=${Array.isArray(raw)?'array':'object'}, entries=${Array.isArray(raw)?raw.length:Object.keys(raw).length}`, 'inf');
         const arr = Array.isArray(raw) ? raw : Object.values(raw);
-        // Use != null instead of truthy — cost:0 is falsy but valid (though unlikely in bazaar)
-        listings = arr.filter(l => l && (l.ID != null || l.id != null) && (l.cost != null || l.price != null));
+        log(`  Torn: ${arr.length} listing${arr.length!==1?'s':''} from itemmarket`, arr.length?'ok':'inf');
+        listings = arr.filter(l => l && l.user_id != null && l.price != null);
+        // Normalize to consistent shape: ID=user_id, cost=price, quantity=quantity
+        listings = listings.map(l => ({ ID: l.user_id, cost: l.price, quantity: l.quantity ?? 1 }));
         log(`  Torn: ${listings.length} valid listing${listings.length!==1?'s':''}`, listings.length?'ok':'inf');
       }
     } catch(e){
@@ -919,19 +921,21 @@ async function runScan(){
         await sleep(200); // space from last Torn call
         const tp = await tornpalFetch(itemId);
         // TornPal response shape: { listings: [{seller_id, price, quantity}] } or array
-        const tpRaw = tp.listings || tp.bazaar || (Array.isArray(tp) ? tp : null);
+        // TornPal clist response: { listings: [{seller_id, price, quantity}] }
+        const tpRaw = tp.listings || tp.itemmarket || tp.bazaar || (Array.isArray(tp) ? tp : null);
         if(tpRaw){
           const tpArr = Array.isArray(tpRaw) ? tpRaw : Object.values(tpRaw);
           let added = 0;
           for(const tl of tpArr){
-            const sid = String(tl.seller_id || tl.ID || tl.id || '');
+            const sid = String(tl.seller_id || tl.user_id || tl.ID || tl.id || '');
             if(!sid) continue;
-            // Dedupe by seller ID
-            if(listings.some(l => String(l.ID ?? l.id ?? '') === sid)) continue;
+            if(listings.some(l => String(l.ID) === sid)) continue;
             listings.push({ ID: sid, cost: tl.price ?? tl.cost ?? 0, quantity: tl.quantity ?? tl.qty ?? 0 });
             added++;
           }
           log(`  TornPal: +${added} listing${added!==1?'s':''} merged`, added?'ok':'inf');
+        } else {
+          log(`  TornPal: unexpected shape — keys: ${Object.keys(tp).join(', ')}`, 'inf');
         }
       } catch(tpe){
         log(`  TornPal: ${tpe.message}`, 'bad');
