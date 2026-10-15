@@ -825,7 +825,7 @@ async function tryLoadItems(){
     const n = Object.keys(allItems).length;
     $('itemSearch').disabled = false;
     $('itemSearch').placeholder = `Search ${n} items by name…`;
-    setPill('done', `${n} items loaded`);
+    setPill('done', `${n} items · ${USE_PROXY?'proxy':'direct'}`);
     updateBtn();
   } catch(e){ showErr(e.message); setPill('err','Load failed'); }
 }
@@ -921,6 +921,7 @@ async function runScan(){
     // ── TORNPAL (secondary source, proxy required) ──
     if(USE_PROXY){
       try{
+        await sleep(200); // space from last Torn call
         const tp = await tornpalFetch(itemId);
         // TornPal response shape: { listings: [{seller_id, price, quantity}] } or array
         const tpRaw = tp.listings || tp.bazaar || (Array.isArray(tp) ? tp : null);
@@ -1131,7 +1132,8 @@ async function ffscoutFetch(playerId){
   const res = await fetch(url);
   if(res.status === 404) return null;
   if(!res.ok) throw new Error(`FFscout ${res.status}`);
-  const d = await res.json();
+  let d;
+  try{ d = await res.json(); } catch(e){ throw new Error('FFscout bad response'); }
   const u = d.user || d.data || d;
   return {
     strength:  u.strength  || u.str || 0,
@@ -1144,26 +1146,42 @@ async function ffscoutFetch(playerId){
 
 /* ── HELPERS ── */
 // ── PROXY CONFIG ──
-// If proxy.php is in the same dir as index.html, this works as-is.
-// If hosted elsewhere, update PROXY_URL to the full path.
 const PROXY_URL = './proxy.php';
-const USE_PROXY = true; // set false to hit Torn directly (CORS OK, but TornPal blocked)
+let USE_PROXY = false; // auto-detected on first call — do not set manually
+
+// Probe proxy once on startup. Sets USE_PROXY and updates pill label.
+let _proxyProbed = false;
+async function probeProxy(){
+  if(_proxyProbed) return;
+  _proxyProbed = true;
+  try{
+    const res = await fetch(`${PROXY_URL}?target=torn&path=%2Ftorn%2F0%3Fselections%3Dnothing`, {method:'GET'});
+    // Any JSON back (even an error object) means PHP is running
+    const text = await res.text();
+    if(text.trim().startsWith('{') || text.trim().startsWith('[')){
+      USE_PROXY = true;
+    }
+  } catch(e){ /* proxy unreachable — stay false */ }
+}
 
 async function tornFetch(path, keyOverride){
   const key = keyOverride || getCfg().apiKey || '';
   if(!key) throw new Error('No API key — open ⚙ settings');
-  let url;
+  await probeProxy(); // noop after first call
+  let res;
   if(USE_PROXY){
     const sep = path.includes('?') ? '&' : '?';
     const tornPath = encodeURIComponent(`${path}${sep}key=${key}&comment=mugbuzz`);
-    url = `${PROXY_URL}?target=torn&path=${tornPath}`;
+    res = await fetch(`${PROXY_URL}?target=torn&path=${tornPath}`);
   } else {
+    // Direct — Torn allows cross-origin, TornPal won't work but this always does
     const sep = path.includes('?') ? '&' : '?';
-    url = `https://api.torn.com${path}${sep}key=${key}&comment=mugbuzz`;
+    res = await fetch(`https://api.torn.com${path}${sep}key=${key}&comment=mugbuzz`);
   }
-  const res = await fetch(url);
   if(!res.ok) throw new Error(`HTTP ${res.status}`);
-  const d = await res.json();
+  let d;
+  try{ d = await res.json(); }
+  catch(e){ throw new Error(`Bad response from ${USE_PROXY?'proxy':'Torn API'} — is proxy.php running?`); }
   if(d.error){
     const code = d.error.code;
     if(code === 5) throw new Error(`Rate limit hit (code 5) — slow down`);
@@ -1173,10 +1191,12 @@ async function tornFetch(path, keyOverride){
 }
 
 async function tornpalFetch(itemId){
-  if(!USE_PROXY) throw new Error('TornPal requires proxy (CORS)');
+  await probeProxy();
+  if(!USE_PROXY) throw new Error('proxy not available');
   const res = await fetch(`${PROXY_URL}?target=tornpal&itemId=${itemId}`);
   if(!res.ok) throw new Error(`TornPal HTTP ${res.status}`);
-  const d = await res.json();
+  let d;
+  try{ d = await res.json(); } catch(e){ throw new Error('TornPal bad response'); }
   return d;
 }
 function setPill(type, text){ const p=$('pill'); p.className=`pill ${type}`; p.textContent=text; }
