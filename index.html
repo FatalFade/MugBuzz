@@ -657,15 +657,10 @@ body {
 
     <div class="fgroup">
       <div class="fgroup-title">Seller Filters</div>
-      <div class="grid2">
-        <div class="field">
-          <label>Max Acc. Age (days)</label>
-          <input type="number" id="maxAge" value="365" min="1" max="9999">
-        </div>
-        <div class="field">
-          <label>Min Offline (mins)</label>
-          <input type="number" id="minOffline" value="5" min="1" max="2880">
-        </div>
+      <div class="field">
+        <label>Max Acc. Age (days)</label>
+        <input type="number" id="maxAge" value="9999" min="1" max="9999">
+        <span class="hint">Sellers hospitalised or abroad are always skipped automatically.</span>
       </div>
       <div class="field">
         <label>Max Listings Checked / Item</label>
@@ -782,7 +777,6 @@ function applyStored(){
   if(c.apiKey)      $('apiKey').value      = c.apiKey;
   if(c.ffKey)       $('ffKey').value       = c.ffKey;
   if(c.maxAge)      $('maxAge').value      = c.maxAge;
-  if(c.minOffline)  $('minOffline').value  = c.minOffline;
   if(c.maxCheck)    $('maxCheck').value    = c.maxCheck;
   if(c.minDiscount !== undefined) $('minDiscount').value = c.minDiscount;
   $('fetchStats').checked = !!c.fetchStats;
@@ -805,7 +799,6 @@ $('saveBtn').addEventListener('click', ()=>{
     apiKey:      $('apiKey').value.trim(),
     ffKey:       $('ffKey').value.trim(),
     maxAge:      $('maxAge').value,
-    minOffline:  $('minOffline').value,
     maxCheck:    $('maxCheck').value,
     minDiscount: $('minDiscount').value,
     fetchStats:  $('fetchStats').checked,
@@ -873,8 +866,10 @@ $('scanBtn').addEventListener('click', ()=>{ if(scanning){ abort=true; } else { 
 
 async function runScan(){
   const c=getCfg();
-  const maxAge=+c.maxAge||365, minOff=+c.minOffline||5, maxChk=+c.maxCheck||30;
-  const minDisc=+c.minDiscount||0, doStats=!!c.fetchStats;
+  const maxAge  = c.maxAge      !== undefined ? +c.maxAge      : 9999;
+  const maxChk  = c.maxCheck    !== undefined ? +c.maxCheck    : 30;
+  const minDisc = c.minDiscount !== undefined ? +c.minDiscount : 0;
+  const doStats = !!c.fetchStats;
 
   scanning=true; abort=false; results=[];
   const btn=$('scanBtn');
@@ -947,7 +942,7 @@ async function runScan(){
     if(!listings.length) continue;
 
     // ── PROFILE FILTER ──
-    let chk=0, matched=0, skipAge=0, skipOnline=0, skipHosp=0, skipDisc=0, errs=0;
+    let chk=0, matched=0, skipAge=0, skipHosp=0, skipDisc=0, errs=0;
     for(const l of listings){
       if(abort||chk>=maxChk) break;
       await sleep(300); // 300ms — safe under Torn's 100 req/min rate limit
@@ -955,6 +950,10 @@ async function runScan(){
       try{
         const p = await tornFetch(`/user/${sellerId}?selections=profile`);
         const now = Date.now() / 1000;
+
+        // Log raw profile shape once per item so we can see actual field names
+        if(chk === 0) log(`  profile keys: [${Object.keys(p).join(', ')}]`, 'inf');
+        if(chk === 0) log(`  signup raw: ${JSON.stringify(p.signup)} | last_action: ${JSON.stringify(p.last_action)} | status: ${JSON.stringify(p.status)}`, 'inf');
 
         // Fix: signup can be a Unix timestamp (number) OR a date string "2019-04-12 00:00:00"
         const signupRaw = p.signup;
@@ -965,16 +964,18 @@ async function runScan(){
           signupTs = Math.floor(new Date(signupRaw).getTime() / 1000);
         }
 
-        const age  = signupTs > 0 ? Math.floor((now - signupTs) / 86400) : 0;
-        const offTs = (p.last_action || {}).timestamp || 0;
-        const off  = offTs > 0 ? Math.floor((now - offTs) / 60) : 0;
-        const hosp = (p.status || {}).state === 'Hospital';
+        const age    = signupTs > 0 ? Math.floor((now - signupTs) / 86400) : 0;
+        const state  = (p.status || {}).state || '';
+        const hosp   = state === 'Hospital';
+        const abroad = state === 'Abroad';
 
         const price   = l.cost ?? l.price ?? 0;
         const discPct = marketValue > 0 ? Math.round((1 - (price / marketValue)) * 100) : null;
         const passDisc = discPct === null || discPct >= minDisc;
 
-        if(age <= maxAge && off >= minOff && !hosp && passDisc){
+        log(`  [${sellerId}] age=${age}d state=${state||'Okay'} price=$${price} disc=${discPct??'n/a'}% pass=${!hosp&&!abroad&&age<=maxAge&&passDisc}`, 'inf');
+
+        if(age <= maxAge && !hosp && !abroad && passDisc){
           const entry = {
             itemId, itemName, sellerId,
             sellerName: p.name || l.name || `[${sellerId}]`,
@@ -991,8 +992,8 @@ async function runScan(){
         } else {
           const why = [];
           if(age > maxAge)  { why.push(`age ${age}d > ${maxAge}d`); skipAge++; }
-          if(off < minOff)  { why.push(`online ${off}m ago`); skipOnline++; }
           if(hosp)          { why.push('hospitalised'); skipHosp++; }
+          if(abroad)        { why.push('abroad'); skipHosp++; }
           if(!passDisc)     { why.push(`disc ${discPct}% < ${minDisc}%`); skipDisc++; }
           log(`  — [${sellerId}]: ${why.join(' · ')}`, 'inf');
         }
@@ -1005,7 +1006,7 @@ async function runScan(){
     }
 
     // Scan summary for this item
-    log(`  ─── ${itemName}: ${chk} checked · ${matched} matched · ${skipAge} age · ${skipOnline} online · ${skipHosp} hosp · ${errs} err`, 'inf');
+    log(`  ─── ${itemName}: ${chk} checked · ${matched} matched · ${skipAge} age · ${skipHosp} hosp/abroad · ${skipDisc} disc · ${errs} err`, 'inf');
   }
 
   setProgress(100);
